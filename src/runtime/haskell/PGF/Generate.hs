@@ -3,13 +3,14 @@ module PGF.Generate
          , generateFrom,        generateFromDepth
          , generateRandom,      generateRandomDepth
          , generateRandomFrom,  generateRandomFromDepth
-         , prove
+         , prove,               generateFromOntology
          ) where
 
 import PGF.CId
 import PGF.Data
 --import PGF.Macros
 import PGF.TypeCheck
+import PGF.ByteCode
 --import PGF.Probabilistic
 
 --import Data.Maybe (fromMaybe)
@@ -17,8 +18,11 @@ import PGF.TypeCheck
 --import qualified Data.IntMap as IntMap
 import Control.Monad
 import Control.Monad.Identity
+import Control.Monad.State
 import System.Random
-
+import qualified Data.Map as Map
+import Data.Maybe
+import Data.List
 
 ------------------------------------------------------------------------------
 -- The API
@@ -31,19 +35,19 @@ generateAll pgf ty = generateAllDepth pgf ty Nothing
 -- | A variant of 'generateAll' which also takes as argument
 -- the upper limit of the depth of the generated expression.
 generateAllDepth :: PGF -> Type -> Maybe Int -> [Expr]
-generateAllDepth pgf ty dp = generate () pgf ty dp
+generateAllDepth = generate ()
 
 -- | Generates a list of abstract syntax expressions
 -- in a way similar to 'generateAll' but instead of
 -- generating all instances of a given type, this
--- function uses a template. 
+-- function uses a template.
 generateFrom :: PGF -> Expr -> [Expr]
 generateFrom pgf ex = generateFromDepth pgf ex Nothing
 
 -- | A variant of 'generateFrom' which also takes as argument
 -- the upper limit of the depth of the generated subexpressions.
 generateFromDepth :: PGF -> Expr -> Maybe Int -> [Expr]
-generateFromDepth pgf e dp = 
+generateFromDepth pgf e dp =
   [e | (_,_,e) <- snd $ runTcM (abstract pgf)
                                (generateForMetas (prove dp) e)
                                emptyMetaStore ()]
@@ -65,20 +69,44 @@ generateRandomFrom g pgf e = generateRandomFromDepth g pgf e Nothing
 
 -- | Random generation based on template with a limitation in the depth.
 generateRandomFromDepth :: RandomGen g => g -> PGF -> Expr -> Maybe Int -> [Expr]
-generateRandomFromDepth g pgf e dp = 
+generateRandomFromDepth g pgf e dp =
   restart g (\g -> [e | (_,ms,e) <- snd $ runTcM (abstract pgf)
                                                  (generateForMetas (prove dp) e)
                                                  emptyMetaStore (Identity g)])
+
+generateFromOntology :: RandomGen g => g -> PGF -> Type -> [(CId, Maybe Expr)] -> [Expr]
+generateFromOntology g pgf ty ce = generateOnt (Ontology ce g) pgf ty Nothing
+
+
+
 
 
 ------------------------------------------------------------------------------
 -- The main generation algorithm
 
 generate :: Selector sel => sel -> PGF -> Type -> Maybe Int -> [Expr]
-generate sel pgf ty dp =
-  [e | (_,ms,e) <- snd $ runTcM (abstract pgf)
-                                (prove dp emptyScope (TTyp [] ty) >>= checkResolvedMetaStore emptyScope)
-                                emptyMetaStore sel]
+generate sel pgf ty dp = [e | (_,ms,e) <- res]
+  where res = snd $ runTcM
+          (abstract pgf)
+          (prove dp emptyScope (TTyp [] ty) >>= checkResolvedMetaStore emptyScope)
+          emptyMetaStore
+          sel
+
+
+generateOnt :: RandomGen g => Ontology g -> PGF -> Type -> Maybe Int -> [Expr]
+generateOnt sel pgf ty dp = [e | (_,(Ontology ce _),e) <- res, fst $ mapAccumL (\ r (c, me) -> (r && isNothing me, (c, me))) True ce]
+  where res = snd $ runTcM
+          (abstract pgf)
+          (proveOnt (Just 10) emptyScope (TTyp [] ty) >>= checkResolvedMetaStore emptyScope) -- TODO check if 10 helps
+          emptyMetaStore
+          sel
+
+setProbs (Abstr aflags' funs' cats') = Abstr aflags' funs'' cats'
+  where funs'' = Map.update (f 0.01) (mkCId "BSat") $ Map.update (f 0.99) (mkCId "CSat") funs'
+        f p (t, i, mb, _)   = Just (t, i, mb, p)
+
+proveOnt :: RandomGen g => Maybe Int -> Scope -> TType -> TcM (Ontology g) Expr
+proveOnt = prove
 
 prove :: Selector sel => Maybe Int -> Scope -> TType -> TcM sel Expr
 prove dp scope (TTyp env1 (DTyp hypos1 cat es1)) = do
@@ -92,6 +120,7 @@ prove dp scope (TTyp env1 (DTyp hypos1 cat es1)) = do
   vs2 <- mapM (PGF.TypeCheck.eval env2) es2
   sequence_ [eqValue mzero suspend (scopeSize scope') v1 v2 | (v1,v2) <- zip vs1 vs2]
   es <- mapM (descend scope') args
+  a <- getAbs
   return (abs hypos1 (foldl EApp fe es))
   where
     suspend i c = do
@@ -104,7 +133,7 @@ prove dp scope (TTyp env1 (DTyp hypos1 cat es1)) = do
     abs ((bt,x,ty):hypos) e = EAbs bt x (abs hypos e)
 
     exScope scope env []                = scope
-    exScope scope env ((bt,x,ty):hypos) = 
+    exScope scope env ((bt,x,ty):hypos) =
        let env' | x /= wildCId = VGen (scopeSize scope) [] : env
                 | otherwise    = env
        in exScope (addScopedVar x (TTyp env ty) scope) env' hypos
@@ -121,12 +150,21 @@ prove dp scope (TTyp env1 (DTyp hypos1 cat es1)) = do
     descend scope (bt,arg) = do
       let dp' = fmap (flip (-) 1) dp
       e <- case arg of
-             Right e  -> return e
-             Left tty -> prove dp' scope tty
+        Right e  -> return e
+        Left tty -> prove dp' scope tty
       e <- case bt of
-             Implicit -> return (EImplArg e)
-             Explicit -> return e
+        Implicit -> return (EImplArg e)
+        Explicit -> return e
       return e
+
+
+
+
+
+
+
+
+
 
 
 -- Helper function for random generation. After every
@@ -146,6 +184,7 @@ instance Selector () where
   splitSelector s = (s,s)
   select cat scope dp = do
     gens <- typeGenerators scope cat
+    fail $ show gens
     TcM (\abstr k h -> iter k gens)
     where
       iter k []              ms s = id
@@ -171,3 +210,38 @@ instance RandomGen g => Selector (Identity g) where
         | d < p || null gens = (p,(e,ty),gens)
         | otherwise = let (p',e_ty',gens') = hit (d-p) gens
                       in (p',e_ty',gen:gens')
+
+
+
+data Ontology a = Ontology  [(CId, Maybe Expr)] a
+
+instance RandomGen g => Selector (Ontology g) where
+  splitSelector (Ontology et g) = let (g1,g2) = split g
+                                  in (Ontology et g1, Ontology et g2)
+
+  select cat scope dp = do
+    (Ontology ce a) <- get
+    print ce
+    case lookup cat ce of
+      Just (Just e) -> let ce' = insert (cat, Nothing) $ delete (cat, Just e) ce
+                       in do put (Ontology ce' a)
+                             return (e, TTyp [] (DTyp [] cat []))
+      Just Nothing  -> mzero
+      _ -> do gens <- typeGenerators scope cat
+              TcM (\abstr k h -> iter k 1.0 gens)
+                where
+                  iter k p []   ms (Ontology ce g) = id
+                  iter k p gens ms (Ontology ce g) =
+                    let (d,g')    = randomR (0.0,p) g
+                        (g1,g2)   = split g'
+                        (p',e_ty,gens') = hit d gens
+                    in k e_ty ms (Ontology ce g1) . iter k (p-p') gens' ms (Ontology ce g2)
+
+                  hit :: Double -> [(Double,Expr,TType)] -> (Double,(Expr,TType),[(Double,Expr,TType)])
+                  hit d (gen@(p,e,ty):gens) | d < p || null gens = (p,(e,ty),gens)
+                                         | otherwise = let (p',e_ty',gens') = hit (d-p) gens
+                                                       in (p',e_ty',gen:gens')
+
+
+-- if (showCId cat == "Temperature")
+        -- then return (EApp (EFun (mkCId "TemperatureVal")) (ELit (LFlt 44)), TTyp [] (DTyp [] cat []))

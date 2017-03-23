@@ -36,6 +36,9 @@ data Instr
   | POP_ACCUM
   | ADD
 
+instance Show Instr where
+  show _ = ""
+
 data IVal
   = HEAP     {-# UNPACK #-} !Int
   | ARG_VAR  {-# UNPACK #-} !Int

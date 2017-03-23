@@ -12,7 +12,7 @@ resource ResEng = ParamX ** open Prelude in {
   flags optimize=all ;
 
 
--- Some parameters, such as $Number$, are inherited from $ParamX$.
+--linlincat cate- Some parameters, such as $Number$, are inherited from $ParamX$.
 
 --2 For $Noun$
 

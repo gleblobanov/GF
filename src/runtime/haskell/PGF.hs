@@ -42,7 +42,7 @@ module PGF(
            -- * Expressions & Trees
            -- ** Tree
            Tree,
-
+           expr2tree,
            -- ** Expr
            Expr,
            showExpr, readExpr,
@@ -111,6 +111,7 @@ module PGF(
            generateFrom,        generateFromDepth,
            generateRandom,      generateRandomDepth,
            generateRandomFrom,  generateRandomFromDepth,
+           generateFromOntology,
 
            -- ** Morphological Analysis
            Lemma, Analysis, Morpho,
@@ -150,7 +151,7 @@ module PGF(
            -- * Tries
            ATree(..),Trie(..),toATree,toTrie
           ) where
-
+import PGF.Tree (expr2tree)
 import PGF.CId
 import PGF.Linearize
 --import PGF.SortTop
