@@ -184,7 +184,6 @@ instance Selector () where
   splitSelector s = (s,s)
   select cat scope dp = do
     gens <- typeGenerators scope cat
-    fail $ show gens
     TcM (\abstr k h -> iter k gens)
     where
       iter k []              ms s = id
